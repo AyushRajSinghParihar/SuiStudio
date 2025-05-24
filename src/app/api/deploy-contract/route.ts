@@ -1,277 +1,223 @@
-import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
-import { fromB64 } from '@mysten/sui/utils';
-import { SuiClient, getFullnodeUrl } from '@mysten/sui/client';
-import { Transaction } from '@mysten/sui/transactions';
-import { writeFileSync, mkdirSync, existsSync } from 'fs';
-import { join, dirname } from 'path';
 import { execSync } from 'child_process';
-import { fileURLToPath } from 'url';
-import { tmpdir } from 'os';
+import { Ed25519Keypair } from '@mysten/sui.js/keypairs/ed25519';
+import { getFullnodeUrl, SuiClient } from '@mysten/sui.js/client';
+import { TransactionBlock } from '@mysten/sui.js/transactions';
+import fs from 'fs';
+import path from 'path';
 
-// Configuration
-const SUI_NETWORK = 'testnet';
-const SUI_RPC_URL = getFullnodeUrl('testnet');
-const MASTER_WALLET_MNEMONIC = process.env.MASTER_WALLET_MNEMONIC || '';
-const GAS_BUDGET = 100000000; // 0.1 SUI
-
-// Initialize Sui client
-const client = new SuiClient({
-  url: SUI_RPC_URL,
-});
-
-// Interface for the deploy contract request body
-interface DeployContractRequest {
-  moveCode: string;
-}
+// Environment variables
+const MASTER_WALLET_MNEMONIC = process.env.MASTER_WALLET_MNEMONIC;
+const SUI_NETWORK = process.env.SUI_NETWORK || 'testnet';
 
 export async function POST(request: Request) {
   try {
     const { moveCode } = await request.json();
-    
+
     if (!moveCode) {
       return new Response(
-        JSON.stringify({ error: 'Move code is required' }), 
+        JSON.stringify({ error: 'Move code is required' }),
         { status: 400, headers: { 'Content-Type': 'application/json' } }
       );
     }
 
-        // Extract module name from Move code
-    const moduleNameMatch = moveCode.match(/module\s+(\w+::)?(\w+)/);
-    const moduleName = moduleNameMatch ? moduleNameMatch[2] || 'module' : 'module';
+    // 1. Create a temporary directory for the Move project
+    const tempDir = path.join(process.cwd(), 'temp-contract');
+    const sourcesDir = path.join(tempDir, 'sources');
+    const moveTomlPath = path.join(tempDir, 'Move.toml');
+    const moveFilePath = path.join(sourcesDir, 'contract.move');
 
-    // Create a new burner wallet
-    console.log('Creating burner wallet...');
-    const keypair = Ed25519Keypair.generate();
-    const address = keypair.toSuiAddress();
-    // Get private key as hex
-    const privateKeyBytes = keypair.getSecretKey();
-    const privateKeyHex = Buffer.from(privateKeyBytes).toString('hex');
-    
-    console.log(`Using module name: ${moduleName}`);
-
-    // Fund the burner wallet from the master wallet (if configured)
-    if (MASTER_WALLET_MNEMONIC) {
-      try {
-        console.log('Funding burner wallet...');
-        // Convert mnemonic to keypair
-        let masterKeypair;
-        try {
-          // First try as a base64-encoded private key
-          masterKeypair = Ed25519Keypair.fromSecretKey(fromB64(MASTER_WALLET_MNEMONIC));
-        } catch (e) {
-          // If that fails, try as a mnemonic phrase
-          masterKeypair = Ed25519Keypair.deriveKeypair(MASTER_WALLET_MNEMONIC);
-        }
-        
-        // Request test tokens from the faucet
-        const faucetResponse = await fetch(`https://faucet.${SUI_NETWORK}.sui.io/gas`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            FixedAmountRequest: {
-              recipient: address
-            }
-          })
-        });
-        
-        if (!faucetResponse.ok) {
-          throw new Error(`Failed to fund wallet: ${await faucetResponse.text()}`);
-        }
-        
-        // Wait a moment for the faucet to process
-        await new Promise(resolve => setTimeout(resolve, 2000));
-        
-        // Transfer some SUI to the burner wallet
-        const tx = new Transaction();
-        tx.setSender(masterKeypair.toSuiAddress());
-        const [coin] = tx.splitCoins(tx.gas, [GAS_BUDGET]);
-        tx.transferObjects([coin], address);
-        
-        await client.signAndExecuteTransaction({
-          transaction: tx,
-          signer: masterKeypair,
-        });
-        
-        console.log(`Funded burner wallet ${address} with ${GAS_BUDGET} MIST`);
-      } catch (error) {
-        console.error('Error funding burner wallet:', error);
-        // Continue even if funding fails - the user can fund manually
+    try {
+      // Create directory structure
+      if (!fs.existsSync(tempDir)) {
+        fs.mkdirSync(tempDir, { recursive: true });
+        fs.mkdirSync(sourcesDir, { recursive: true });
       }
-    }
 
-    // Create a temporary directory for the Move package
-    const tempDir = join(tmpdir(), `sui-studio-${Date.now()}`);
-    const sourcesDir = join(tempDir, 'sources');
-    const moveTomlPath = join(tempDir, 'Move.toml');
-    
-    // Create directory structure
-    mkdirSync(sourcesDir, { recursive: true });
-    
-    // Write Move.toml
-    const moveTomlContent = `[package]
-name = "sui_studio_pkg"
+      // 2. Create Move.toml
+      const moveTomlContent = `[package]
+name = "temp_contract"
 version = "0.0.1"
-
-[addresses]
-sui_studio = "${address}"
+edition = "2024.beta"
 
 [dependencies]
 Sui = { git = "https://github.com/MystenLabs/sui.git", subdir = "crates/sui-framework/packages/sui-framework", rev = "framework/testnet" }
 
-[dev-dependencies]`;
-    
-    writeFileSync(moveTomlPath, moveTomlContent);
-    
-    // Write the Move module
-    const moveFileName = 'module.move';
-    const moveFilePath = join(sourcesDir, moveFileName);
-    writeFileSync(moveFilePath, moveCode);
+[addresses]
+temp_contract = "0x0"
+`;
+      fs.writeFileSync(moveTomlPath, moveTomlContent);
 
-    try {
-      // Build the Move package
-      console.log('Building Move package...');
-      const buildOutput = execSync(
-        `sui move build --dump-bytecode-as-base64 --path "${tempDir}"`,
-        { encoding: 'utf-8' }
-      );
-      
-      // Parse the build output to get the compiled modules
-      // Split by newlines and filter out empty lines
-      const modules = buildOutput
-        .split('\n')
-        .map(s => s.trim())
-        .filter(s => s.length > 0);
+      // 3. Write the Move code
+      fs.writeFileSync(moveFilePath, moveCode);
 
-      if (modules.length === 0) {
-        throw new Error('No compiled modules found in build output');
-      }
-
-      // Publish the package
-      console.log('Publishing package...');
-      const tx = new Transaction();
-      tx.setSender(address);
-      
-      // Publish the compiled modules
-      const [upgradeCap] = tx.publish({
-        modules: modules,
-        dependencies: ['0x2'] // Only need the Sui framework
+      // 4. Build the Move package
+      const buildOutput = execSync('sui move build --dump-bytecode-as-base64', {
+        cwd: tempDir,
+        encoding: 'utf-8',
       });
 
-    // Sign and execute the transaction
-    const result = await client.signAndExecuteTransaction({
-      transaction: tx,
-      signer: keypair,
-      options: {
-        showEffects: true,
-        showEvents: true,
-      },
-    });      
-      console.log('Publish result:', result);
-      
-      if (result.effects?.status?.status !== 'success') {
-        throw new Error('Publish transaction failed');
+      // 5. Parse the build output to get the compiled modules
+      const modulesMatch = buildOutput.match(/Compiled Modules: \[([^\]]+)\]/);
+      if (!modulesMatch) {
+        throw new Error('Failed to extract compiled modules from build output');
       }
-      
-      // Extract the package ID and upgrade capability from the transaction effects
-      // Find the package object in the created objects
-      const packageObj = result.effects?.created?.find(
-        (obj) => obj.owner === 'Immutable' && obj.reference?.objectId
-      );
-      
-      if (!packageObj) {
-        throw new Error('Failed to find package object in transaction effects');
+
+      const modules = modulesMatch[1]
+        .split(',')
+        .map((m: string) => m.trim().replace(/"/g, ''))
+        .filter(Boolean);
+
+      // 6. Set up the Sui client
+      const client = new SuiClient({ url: getFullnodeUrl(SUI_NETWORK) });
+
+      // 7. Generate or use the master wallet
+      let keypair;
+      let isUsingMasterWallet = false;
+
+      if (MASTER_WALLET_MNEMONIC) {
+        // Use the master wallet for deployment
+        keypair = Ed25519Keypair.deriveKeypair(MASTER_WALLET_MNEMONIC);
+        isUsingMasterWallet = true;
+      } else {
+        // Fallback: Generate a new burner wallet
+        keypair = Ed25519Keypair.generate();
       }
-      
-      const packageId = packageObj.reference.objectId;
-      
+
+      const address = keypair.getPublicKey().toSuiAddress();
+      const privateKeyHex = Buffer.from(keypair.getSecretKey().slice(0, 32)).toString('hex');
+
+      // 8. Fund the wallet if needed (only for testnet/devnet)
+      if (!isUsingMasterWallet && (SUI_NETWORK === 'testnet' || SUI_NETWORK === 'devnet')) {
+        try {
+          // Try to request from faucet first
+          await fetch(`https://faucet.${SUI_NETWORK}.sui.io/gas`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ FixedAmountRequest: { recipient: address } }),
+          });
+
+          // Wait for the transaction to complete
+          await new Promise(resolve => setTimeout(resolve, 3000));
+        } catch (error) {
+          console.warn('Faucet request failed, trying master wallet funding...');
+          
+          if (MASTER_WALLET_MNEMONIC) {
+            const masterKeypair = Ed25519Keypair.deriveKeypair(MASTER_WALLET_MNEMONIC);
+            const masterClient = new SuiClient({ url: getFullnodeUrl(SUI_NETWORK) });
+            
+            const tx = new TransactionBlock();
+            const [coin] = tx.splitCoins(tx.gas, [tx.pure(1000000000)]); // 1 SUI
+            tx.transferObjects([coin], tx.pure(address));
+            
+            await masterClient.signAndExecuteTransactionBlock({
+              signer: masterKeypair,
+              transactionBlock: tx,
+            });
+
+            // Wait for the transaction to complete
+            await new Promise(resolve => setTimeout(resolve, 3000));
+          }
+        }
+      }
+
+      // 9. Publish the package using TransactionBlock
+      const tx = new TransactionBlock();
+      tx.setSender(address);
+      tx.setGasBudget(100000000); // 0.1 SUI
+      const [upgradeCap] = tx.publish({ modules });
+
+      const publishTxn = await client.signAndExecuteTransactionBlock({
+        transactionBlock: tx,
+        signer: keypair,
+        options: {
+          showEffects: true,
+          showObjectChanges: true,
+        },
+      });
+
+      // 10. Extract package ID and object ID
+      const packageId = publishTxn.objectChanges?.find(
+        (change: any) => change.type === 'published'
+      )?.packageId;
+
       if (!packageId) {
-        throw new Error('Failed to extract package ID from publish result');
+        throw new Error('Failed to extract package ID from transaction');
       }
+
+      // 11. Try to call the init function
+      let objectId = null;
+      const moduleNameMatch = moveCode.match(/module\s+(\w+)\s*::\s*(\w+)/) || 
+                            moveCode.match(/module\s+(\w+)\s*\{/);
       
-      console.log(`Published package ${packageId}`);
-      
-      // Call the init function if it exists
+      if (moduleNameMatch) {
+        const moduleName = moduleNameMatch[moduleNameMatch.length - 1];
+        
+        try {
+          const initTx = new TransactionBlock();
+          initTx.moveCall({
+            target: `${packageId}::${moduleName}::init`,
+          });
+
+          const initResult = await client.signAndExecuteTransactionBlock({
+            signer: keypair,
+            transactionBlock: initTx,
+          });
+
+          // Try to extract the created object ID
+          if (initResult.objectChanges) {
+            const createdObject = initResult.objectChanges.find(
+              (change: any) => change.type === 'created'
+            );
+            if (createdObject) {
+              objectId = createdObject.objectId;
+            }
+          }
+        } catch (error) {
+          console.warn('Failed to call init function:', error);
+          // Continue without objectId - some contracts might not have an init function
+        }
+      }
+
+      // 12. Clean up the temporary directory
       try {
-        const initTx = new Transaction();
-        initTx.setSender(address);
-        // Use the extracted module name or default to 'module'
-        const targetModuleName = moduleName || 'module';
-        initTx.moveCall({
-          target: `${packageId}::${targetModuleName}::init`,
-          arguments: [],
-        });
-        
-        const initResult = await client.signAndExecuteTransaction({
-          transaction: initTx,
-          signer: keypair,
-        });
-        
-        if (initResult.effects?.status?.status !== 'success') {
-          throw new Error('Init transaction failed');
-        }
-        
-        console.log('Successfully initialized module');
-        
-        // Extract the created object ID from the init transaction
-        const objectId = initResult.effects?.created?.[0]?.reference?.objectId;
-        
-        return new Response(
-          JSON.stringify({
-            packageId,
-            objectId: objectId || null,
-            privateKeyHex,
-            address,
-          }),
-          {
-            status: 200,
-            headers: { 'Content-Type': 'application/json' },
-          }
-        );
-        
-      } catch (initError) {
-        console.warn('No init function found or init failed, continuing...', initError);
-        
-        // If init fails, still return success but without an objectId
-        return new Response(
-          JSON.stringify({
-            packageId,
-            objectId: null,
-            privateKeyHex,
-            address,
-          }),
-          {
-            status: 200,
-            headers: { 'Content-Type': 'application/json' },
-          }
-        );
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      } catch (cleanupError) {
+        console.warn('Failed to clean up temporary directory:', cleanupError);
       }
-    } catch (error) {
-      console.error('Error during deployment:', error);
+
+      // 13. Return the results
       return new Response(
-        JSON.stringify({ 
-          error: 'Failed to deploy contract',
-          details: error instanceof Error ? error.message : 'Unknown error',
+        JSON.stringify({
+          packageId,
+          objectId,
+          privateKeyHex,
+          address,
+          isUsingMasterWallet,
         }),
-        { 
-          status: 500, 
-          headers: { 'Content-Type': 'application/json' } 
-        }
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
       );
+
+    } catch (error) {
+      // Clean up the temporary directory in case of error
+      try {
+        if (fs.existsSync(tempDir)) {
+          fs.rmSync(tempDir, { recursive: true, force: true });
+        }
+      } catch (cleanupError) {
+        console.warn('Failed to clean up temporary directory:', cleanupError);
+      }
+
+      throw error;
     }
-  } catch (error: any) {
+
+  } catch (error) {
     console.error('Deployment error:', error);
     return new Response(
       JSON.stringify({ 
         error: 'Failed to deploy contract',
-        details: error.message || 'Unknown error',
-        stack: process.env.NODE_ENV === 'development' ? error.stack : undefined,
-      }), 
-      { 
-        status: 500, 
-        headers: { 'Content-Type': 'application/json' } 
-      }
+        details: error instanceof Error ? error.message : String(error)
+      }),
+      { status: 500, headers: { 'Content-Type': 'application/json' } }
     );
   }
 }
