@@ -12,10 +12,10 @@ importers:
         specifier: ^0.3.0
         version: 0.3.1
       '@mysten/bcs':
-        specifier: ^1.6.1
+        specifier: 1.6.1
         version: 1.6.1
       '@mysten/sui':
-        specifier: ^1.30.0
+        specifier: 1.30.0
         version: 1.30.0(typescript@5.8.3)
       '@webcontainer/api':
         specifier: ^1.2.0

@@ -1,152 +1,95 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
 
-// Initialize the Google Generative AI client with your API key
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
+
+const SYSTEM_PROMPT = `
+You are an expert Move and React developer, specialized in building Sui blockchain applications.
+Generate a complete, working Sui Move smart contract and corresponding React frontend based on the user's description.
+
+IMPORTANT: Your response MUST be a valid JSON object with the following structure:
+{
+  "moveCode": "// Sui Move contract code",
+  "frontendCode": "// React component code"
+}
+
+MOVE CONTRACT REQUIREMENTS:
+1. The contract MUST be a complete Sui Move module
+2. Module name should be descriptive (e.g., "counter", "nft_marketplace")
+3. MUST include a parameterless init function that creates and shares the main object
+4. Include all necessary public entry functions for the DApp's functionality
+5. Use Sui framework best practices and security patterns
+
+FRONTEND REQUIREMENTS:
+1. Must be a single React component in App.tsx format
+2. MUST use these exact placeholders:
+   - {{PACKAGE_ID}} for the deployed package ID
+   - {{OBJECT_ID}} for the main object ID
+   - {{BURNER_PRIVATE_KEY_HEX}} for the burner wallet private key
+3. Must initialize its own SuiClient and Keypair
+4. Must include all necessary UI for the DApp's functionality
+5. Should handle loading and error states appropriately
+
+Example for a counter DApp:
+{
+  "moveCode": "module example::counter {\\n    use std::signer;\\n    use sui::object::{Self, UID};\\n    use sui::transfer;\\n    use sui::tx_context::{Self, TxContext};\\n\\n    struct Counter has key {\\n        id: UID,\\n        value: u64,\\n    }\\n\\n    public fun init(ctx: &mut TxContext) {\\n        let counter = Counter {\\n            id: object::new(ctx),\\n            value: 0,\\n        };\\n        transfer::share_object(counter);\\n    }\\n\\n    public entry fun increment(counter: &mut Counter) {\\n        counter.value = counter.value + 1;\\n    }\\n\\n    public fun value(counter: &Counter): u64 {\\n        counter.value\\n    }\\n}",
+  "frontendCode": "import { useState, useEffect } from 'react';\\nimport { TransactionBlock } from '@mysten/sui.js/transactions';\\nimport { SuiClient, getFullnodeUrl } from '@mysten/sui.js/client';\\nimport { Ed25519Keypair } from '@mysten/sui.js/keypairs/ed25519';\\n\\nexport default function App() {\\n  const [counter, setCounter] = useState<number>(0);\\n  const [loading, setLoading] = useState<boolean>(false);\\n  const [error, setError] = useState<string | null>(null);\\n\\n  const client = new SuiClient({ url: getFullnodeUrl('testnet') });\\n  const keypair = Ed25519Keypair.fromSecretKey(\\n    Uint8Array.from(Buffer.from('{{BURNER_PRIVATE_KEY_HEX}}', 'hex'))\\n  );\\n\\n  const fetchCounter = async () => {\\n    try {\\n      const result = await client.getObject({\\n        id: '{{OBJECT_ID}}',\\n        options: { showContent: true },\\n      });\\n      \\n      if (result.data?.content?.dataType === 'moveObject') {\\n        const fields = result.data.content.fields as { value: string };\\n        setCounter(Number(fields.value));\\n      }\\n    } catch (err) {\\n      setError('Failed to fetch counter');\\n      console.error(err);\\n    }\\n  };\\n\\n  const increment = async () => {\\n    setLoading(true);\\n    setError(null);\\n    \\n    try {\\n      const tx = new TransactionBlock();\\n      tx.moveCall({\\n        target: '{{PACKAGE_ID}}::counter::increment',\\n        arguments: [tx.object('{{OBJECT_ID}}')],\\n      });\\n\\n      await client.signAndExecuteTransactionBlock({\\n        signer: keypair,\\n        transactionBlock: tx,\\n      });\\n      \\n      await fetchCounter();\\n    } catch (err) {\\n      setError('Failed to increment counter');\\n      console.error(err);\\n    } finally {\\n      setLoading(false);\\n    }\\n  };\\n\\n  useEffect(() => {\\n    fetchCounter();\\n  }, []);\\n\\n  return (\\n    <div style={{ maxWidth: '600px', margin: '0 auto', padding: '20px' }}>\\n      <h1>Counter DApp</h1>\\n      <div>Current value: {counter}</div>\\n      <button \\n        onClick={increment} \\n        disabled={loading}\\n        style={{\\n          marginTop: '10px',\\n          padding: '8px 16px',\\n          backgroundColor: loading ? '#ccc' : '#007bff',\\n          color: 'white',\\n          border: 'none',\\n          borderRadius: '4px',\\n          cursor: loading ? 'not-allowed' : 'pointer',\\n        }}\\n      >\\n        {loading ? 'Processing...' : 'Increment'}\\n      </button>\\n      {error && (\\n        <div style={{ color: 'red', marginTop: '10px' }}>\\n          Error: {error}\\n        </div>\\n      )}\\n    </div>\\n  );\\n}"
+}
+
+Now generate a complete implementation for: {{USER_PROMPT}}`;
 
 export async function POST(request: Request) {
   try {
     const { prompt } = await request.json();
     
     if (!prompt) {
-      return new Response(JSON.stringify({ error: 'Prompt is required' }), {
-        status: 400,
-        headers: { 'Content-Type': 'application/json' },
-      });
+      return new Response(
+        JSON.stringify({ error: 'Prompt is required' }), 
+        { status: 400, headers: { 'Content-Type': 'application/json' } }
+      );
     }
 
-    // For now, we'll return a simple counter example
-    // In a real implementation, you would call the Gemini API here
-    const moveCode = `module ${generateRandomName()}::counter {
-    use std::signer;
-    use sui::object::{Self, UID};
-    use sui::transfer;
-    use sui::tx_context::{Self, TxContext};
-
-    struct Counter has key {
-        id: UID,
-        value: u64,
-    }
-
-    fun init(ctx: &mut TxContext) {
-        let counter = Counter {
-            id: object::new(ctx),
-            value: 0,
-        };
-        transfer::share_object(counter);
-    }
-
-    public entry fun increment(counter: &mut Counter) {
-        counter.value = counter.value + 1;
-    }
-
-    public fun value(counter: &Counter): u64 {
-        counter.value
-    }
-}`;
-
-    const frontendCode = `import { useWallet } from '@mysten/wallet-kit';
-import { TransactionBlock } from '@mysten/sui.js/transactions';
-import { useSuiClient } from '@mysten/dapp-kit';
-import { useEffect, useState } from 'react';
-
-export default function App() {
-  const { signAndExecuteTransactionBlock } = useWallet();
-  const client = useSuiClient();
-  const [counter, setCounter] = useState<number>(0);
-  const [loading, setLoading] = useState<boolean>(false);
-
-  const packageId = '{{PACKAGE_ID}}';
-  const objectId = '{{OBJECT_ID}}';
-  const privateKey = '{{BURNER_PRIVATE_KEY_HEX}}';
-
-  const fetchCounter = async () => {
-    try {
-      const result = await client.getObject({
-        id: objectId,
-        options: { showContent: true },
-      });
-      
-      if (result.data?.content?.dataType === 'moveObject') {
-        const fields = result.data.content.fields as { value: string };
-        setCounter(Number(fields.value));
-      }
-    } catch (error) {
-      console.error('Error fetching counter:', error);
-    }
-  };
-
-  const increment = async () => {
-    if (!packageId || !objectId) return;
-    
-    setLoading(true);
-    try {
-      const tx = new TransactionBlock();
-      tx.moveCall({
-        target: \`\${packageId}::counter::increment\`,
-        arguments: [tx.object(objectId)],
-      });
-
-      await signAndExecuteTransactionBlock({
-        transactionBlock: tx,
-      });
-      
-      // Refresh the counter value
-      await fetchCounter();
-    } catch (error) {
-      console.error('Error incrementing counter:', error);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    if (objectId) {
-      fetchCounter();
-    }
-  }, [objectId]);
-
-  return (
-    <div className="flex flex-col items-center justify-center min-h-screen bg-gray-100 p-4">
-      <div className="bg-white p-8 rounded-lg shadow-md w-full max-w-md">
-        <h1 className="text-2xl font-bold text-center mb-6">Counter DApp</h1>
-        <div className="text-center mb-6">
-          <p className="text-4xl font-bold">{counter}</p>
-          <p className="text-sm text-gray-500 mt-1">Current Value</p>
-        </div>
-        <button
-          onClick={increment}
-          disabled={loading}
-          className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-4 rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-        >
-          {loading ? 'Processing...' : 'Increment'}
-        </button>
-      </div>
-    </div>
-  );
-}`;
-
-    return new Response(JSON.stringify({ 
-      moveCode,
-      frontendCode 
-    }), {
-      status: 200,
-      headers: { 'Content-Type': 'application/json' },
+    const model = genAI.getGenerativeModel({ 
+      model: "gemini-2.0-flash",
+      generationConfig: { temperature: 0.2 },
     });
+
+    const result = await model.generateContent({
+      contents: [{
+        role: "user",
+        parts: [{ text: SYSTEM_PROMPT.replace('{{USER_PROMPT}}', prompt) }]
+      }],
+    });
+
+    const response = await result.response;
+    const text = response.text();
+    console.log('Raw AI Response:', text);
+
+    // Extract JSON from markdown code block if present
+    const jsonMatch = text.match(/```json\n([\s\S]*?)```/);
+    const jsonString = jsonMatch ? jsonMatch[1] : text;
+
+    const generatedCode = JSON.parse(jsonString);
+
+    if (!generatedCode.moveCode || !generatedCode.frontendCode) {
+      throw new Error('AI response missing required code fields');
+    }
+
+    return new Response(
+      JSON.stringify({
+        moveCode: generatedCode.moveCode,
+        frontendCode: generatedCode.frontendCode
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } }
+    );
+
   } catch (error) {
-    console.error('Error generating code:', error);
-    return new Response(JSON.stringify({ error: 'Failed to generate code' }), {
-      status: 500,
-      headers: { 'Content-Type': 'application/json' },
-    });
+    console.error('Code generation error:', error);
+    return new Response(
+      JSON.stringify({ 
+        error: 'Failed to generate code',
+        details: error instanceof Error ? error.message : 'Unknown error'
+      }),
+      { status: 500, headers: { 'Content-Type': 'application/json' } }
+    );
   }
-}
-
-function generateRandomName() {
-  const adjectives = ['happy', 'sunny', 'clever', 'swift', 'brave', 'gentle', 'jolly', 'lucky'];
-  const nouns = ['tiger', 'panda', 'eagle', 'dolphin', 'koala', 'penguin', 'otter', 'zebra'];
-  
-  const randomAdjective = adjectives[Math.floor(Math.random() * adjectives.length)];
-  const randomNoun = nouns[Math.floor(Math.random() * nouns.length)];
-  
-  return `${randomAdjective}_${randomNoun}`.toLowerCase();
 }
